@@ -25,18 +25,55 @@
 
 static size_t page_size;
 
-static void test_file_read_write(int fd, size_t total_size)
+static void test_file_read(int fd, size_t total_size)
 {
 	char buf[64];
 
 	TEST_ASSERT(read(fd, buf, sizeof(buf)) < 0,
 		    "read on a guest_mem fd should fail");
-	TEST_ASSERT(write(fd, buf, sizeof(buf)) < 0,
-		    "write on a guest_mem fd should fail");
 	TEST_ASSERT(pread(fd, buf, sizeof(buf), 0) < 0,
 		    "pread on a guest_mem fd should fail");
-	TEST_ASSERT(pwrite(fd, buf, sizeof(buf), 0) < 0,
-		    "pwrite on a guest_mem fd should fail");
+}
+
+static void test_write_supported(int fd, size_t total_size)
+{
+	size_t page_size = getpagesize();
+	void *buf = NULL;
+	int ret;
+
+	ret = posix_memalign(&buf, page_size, total_size);
+	TEST_ASSERT_EQ(ret, 0);
+
+	ret = pwrite(fd, buf, page_size, total_size);
+	TEST_ASSERT(ret == -1, "writing past the file size on a guest_mem fd should fail");
+	TEST_ASSERT_EQ(errno, EINVAL);
+
+	ret = pwrite(fd, buf, page_size, 0);
+	TEST_ASSERT(ret == page_size, "write on a guest_mem fd should succeed");
+
+	ret = fallocate(fd, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, 0, page_size);
+	TEST_ASSERT(!ret, "fallocate(PUNCH_HOLE) should succeed");
+
+	free(buf);
+}
+
+static void test_write_not_supported(int fd, size_t total_size)
+{
+	size_t page_size = getpagesize();
+	void *buf = NULL;
+	int ret;
+
+	ret = posix_memalign(&buf, page_size, total_size);
+	TEST_ASSERT_EQ(ret, 0);
+
+	ret = pwrite(fd, buf, page_size, 0);
+	TEST_ASSERT(ret == -1, "write on guest_mem fd should fail");
+	TEST_ASSERT_EQ(errno, ENODEV);
+
+	ret = fallocate(fd, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, 0, page_size);
+	TEST_ASSERT(!ret, "fallocate(PUNCH_HOLE) should succeed");
+
+	free(buf);
 }
 
 static void test_mmap_cow(int fd, size_t size)
@@ -363,10 +400,11 @@ static void __test_guest_memfd(struct kvm_vm *vm, uint64_t flags)
 	test_create_guest_memfd_multiple(vm);
 	test_create_guest_memfd_invalid_sizes(vm, flags);
 
-	gmem_test(file_read_write, vm, flags);
+	gmem_test(file_read, vm, flags);
 
 	if (flags & GUEST_MEMFD_FLAG_MMAP) {
 		if (flags & GUEST_MEMFD_FLAG_INIT_SHARED) {
+			gmem_test(write_supported, vm, flags);
 			gmem_test(mmap_supported, vm, flags);
 			gmem_test(fault_overflow, vm, flags);
 			gmem_test(numa_allocation, vm, flags);
@@ -377,6 +415,7 @@ static void __test_guest_memfd(struct kvm_vm *vm, uint64_t flags)
 		gmem_test(mmap_cow, vm, flags);
 		gmem_test(mbind, vm, flags);
 	} else {
+		gmem_test(write_not_supported, vm, flags);
 		gmem_test(mmap_not_supported, vm, flags);
 	}
 
